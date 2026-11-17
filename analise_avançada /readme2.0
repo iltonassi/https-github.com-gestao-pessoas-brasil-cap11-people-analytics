@@ -1,1 +1,190 @@
 
+# 📊 Capítulo 11 · People Analytics: da teoria à prática com R
+
+Material complementar do **Capítulo 11, People Analytics**, do livro *Gestão de Pessoas nas Empresas Contemporâneas Brasileiras* (Editora GEN, 2ª edição).
+
+Este repositório contém um **pipeline completo e didático em R** para prever o **turnover voluntário** em um hospital. Ele integra seis bases de dados de RH e foi pensado para quem **nunca estudou estatística**: o código começa no básico e avança, etapa por etapa, até um modelo preditivo validado e um plano de ação executivo.
+
+> **A pergunta do capítulo**
+> *"Um hospital perde profissionais por vontade própria. Quem tem mais chance de sair, por quê, e onde o RH deve agir primeiro?"*
+
+---
+
+## 🆕 O que mudou na versão 2.0
+
+| Antes (v1) | Agora (v2.0) |
+|---|---|
+| Lia apenas `.csv` e quebrava com os arquivos `.xlsx` do repositório | Lê `.xlsx` **e** `.csv`; se não achar uma extensão, procura a outra e avisa |
+| Exigia digitar o caminho `C:/...` com `setwd()` | Uma janela abre e você **clica em qualquer arquivo** da pasta das bases |
+| Erros caíam no modo de depuração (`Browse[1]>`) | Erros mostram **mensagens claras em português** dizendo o que corrigir |
+| Números do Excel eram lidos como texto e distorciam o modelo, sem aviso | Conversão automática; o problema virou uma lição (Etapa 2) |
+| Tempo de casa dos desligados contado até 2024, e não até a saída | Tempo de casa recalculado até a data de saída |
+| Promoções com data futura (até 2026) entravam no modelo | Só entra o que aconteceu **até** a saída ou a data de referência |
+| Saídas sem interpretação | Cada etapa imprime uma **">> LEITURA"** em linguagem simples, gerada a partir dos próprios resultados |
+| Tabelas e gráficos só na tela | **10 gráficos (.png) e 7 tabelas (.csv)** salvos automaticamente |
+
+---
+
+## 📂 Estrutura do repositório
+
+```
+├── 01-codigos-r/
+│   └── analise_turnover.R          ← script principal (v2.0)
+├── 02_datasets/
+│   ├── Dataset_1_Employee_Master_nomes.xlsx   cadastro, salário, desempenho, status
+│   ├── Dataset_2_Engagement_Survey.xlsx       pesquisa de clima e liderança
+│   ├── Dataset_3_Shift_Schedule.csv           58.011 escalas de turno e horas extras
+│   ├── Dataset_4_Promotion_History.csv        histórico de promoções
+│   ├── Dataset_5_Commute_Data.csv             deslocamento casa-trabalho
+│   └── Dataset_6_Patient_Ratios.csv           pacientes por profissional
+├── 03_documentacao/                 instrumento de diagnóstico de maturidade em People Analytics
+└── 04_exercicios/                   exercícios de análise descritiva e preditiva
+```
+
+Os dados são **fictícios**, construídos para se parecer com os de um hospital real. Todas as bases se ligam por uma única chave: `Employee_ID`.
+
+---
+
+## 🚀 Como rodar (passo a passo)
+
+### 1. Pré-requisitos
+- **R** 4.1 ou superior ([cran.r-project.org](https://cran.r-project.org))
+- **RStudio** ([posit.co/download/rstudio-desktop](https://posit.co/download/rstudio-desktop/))
+
+Os pacotes (`tidyverse`, `readxl`, `caret`, `pROC`, `broom`, `car`) são **instalados automaticamente** na primeira execução, o que exige conexão com a internet.
+
+### 2. Baixe o material
+Clique no botão verde **`<> Code` → Download ZIP** e descompacte o arquivo no seu computador.
+
+### 3. Ajuste uma configuração do RStudio (uma vez só)
+Menu **Debug → On Error → Message Only**.
+Assim, se algo der errado, você vê uma mensagem clara em vez de entrar no modo de depuração (`Browse[1]>`).
+
+### 4. Abra e execute
+1. Abra `01-codigos-r/analise_turnover.R` no RStudio.
+2. Execute linha a linha com **Ctrl + Enter** (ou tudo de uma vez com **Ctrl + Shift + Enter**).
+3. Na **Etapa 1**, uma janela vai abrir: **navegue até a pasta `02_datasets` e clique em qualquer um dos arquivos**. Pronto: o R passa a usar essa pasta para todas as bases.
+
+### Como a importação funciona (Etapa 1)
+
+| Passo | O que acontece | O que você faz |
+|---|---|---|
+| **1. Pasta** | `file.choose()` abre uma janela; o R guarda a pasta do arquivo clicado e lista os arquivos dela | Clica em qualquer arquivo da pasta |
+| **2. Nomes** | Uma lista mostra o nome e a extensão de cada uma das 6 bases | Só edita se o seu arquivo tiver outro nome |
+| **3. Leitura** | Cada extensão usa a sua função: `.xlsx` → `read_excel()`; `.csv` com vírgula → `read_csv()`; `.csv` com ponto e vírgula → `read_delim(";")` | Nada |
+
+Se a extensão indicada não existir, o R procura a outra e avisa:
+
+```
+Aviso: Dataset_1_Employee_Master_nomes.xlsx não existe; usando Dataset_1_Employee_Master_nomes.csv
+```
+
+---
+
+## 🧭 A jornada de aprendizagem: 14 etapas
+
+| Etapa | Tema | Pergunta que a etapa responde | Nível |
+|---|---|---|---|
+| 0 | Preparar o ambiente | Que ferramentas vamos usar? | Básico |
+| 1 | Importar as 6 bases | Como trazer dados de sistemas diferentes para o R? | Básico |
+| 2 | **Detetive de dados** | Que armadilhas os dados escondem? | Básico |
+| 3 | Indicadores por dimensão | Como transformar 58 mil escalas em um retrato por pessoa? | Intermediário |
+| 4 | Base analítica + LGPD | Como integrar tudo protegendo a privacidade? | Intermediário |
+| 5 | Retrato geral | Qual é o tamanho do problema? Onde ele é maior? | Básico |
+| 6 | **Raio-x por dimensão** | Quem sai é diferente de quem fica? A diferença é real ou acaso? | Intermediário |
+| 7 | Correlação | Quais variáveis "dizem a mesma coisa"? | Intermediário |
+| 8 | **Teste da intuição** | Só as horas extras bastam para prever a saída? | Intermediário |
+| 9 | Regressão múltipla + stepwise | Qual é o melhor conjunto de fatores? | Avançado |
+| 10 | Odds ratios | Quanto cada fator aumenta ou reduz a chance de saída? | Avançado |
+| 11 | Matriz de confusão, ROC e Youden | O modelo acerta? Qual ponto de corte usar? | Avançado |
+| 12 | Validação cruzada | O resultado se sustenta ou foi sorte? | Avançado |
+| 13 | **Matriz risco × desempenho** | Quem o RH deve procurar primeiro, e quanto isso custa? | Aplicado |
+| 14 | Limites e ética | O que o modelo **não** diz? | Reflexão |
+
+### As cinco dimensões analisadas
+
+| Dimensão | Fonte | Exemplos de indicadores |
+|---|---|---|
+| **Perfil** | Dataset 1 | idade, tempo de casa, salário, avaliação de desempenho |
+| **Jornada** | Dataset 3 | horas extras por turno, % de turnos noturnos |
+| **Carreira** | Dataset 4 | nº de promoções, meses sem promoção |
+| **Deslocamento** | Dataset 5 | tempo e distância casa-trabalho |
+| **Sobrecarga** | Dataset 6 | pacientes por profissional (média e pico) |
+| **Clima** | Dataset 2 | satisfação, gestor, equilíbrio vida-trabalho (usada só no diagnóstico final, para evitar vazamento de dados) |
+
+---
+
+## 🔍 As quatro armadilhas da Etapa 2
+
+Nenhuma delas gera mensagem de erro, mas todas produziriam um modelo errado:
+
+1. **Números guardados como texto.** No Excel, salário e desempenho chegam como texto, e o modelo trataria cada salário como uma categoria diferente.
+2. **A "data de hoje" da base.** A última escala registrada é de 01/11/2024; tudo que vier depois é futuro.
+3. **Tempo de casa dos desligados.** Foi contado até 2024, e não até a data de saída.
+4. **Registros do futuro e lacunas.** São 49 promoções com data posterior à referência e algumas pessoas sem registro de escala.
+
+---
+
+## 💡 O que os dados revelam
+
+Resultados obtidos com a semente `set.seed(2026)`. Pequenas variações podem ocorrer com outras versões dos pacotes.
+
+- **A intuição não se confirmou: horas extras não distinguem quem sai de quem fica** (p = 0,77). O modelo que usa só horas extras tem AUC de 0,50, o mesmo que cara ou coroa. A Etapa 8 foi construída em torno desse resultado.
+- **Os sinais reais estão no tempo de casa e na carreira.** Quem saiu tinha, em média, 48% menos tempo de casa que quem ficou.
+- **A diferença entre departamentos pode ser acaso.** A Administração aparece com 23,8% de turnover, mas o teste qui-quadrado dá p = 0,45.
+- **O modelo final** usa tempo de casa, salário e deslocamento e chega a **AUC de 0,80** no teste. Na validação cruzada (25 rodadas), a média foi 0,82.
+- **O ponto de corte importa.** Com corte em 0,50, o modelo detecta 6 de 18 saídas reais; com o corte de Youden, detecta 14.
+- **Plano de ação:** 35 talentos de alto desempenho estão em alto risco. Eles têm, em média, 33 meses de casa, contra 88 no grupo de manutenção, o que coloca **onboarding e integração** como prioridade.
+
+---
+
+## 📁 Saídas geradas automaticamente
+
+Ao final da execução, a pasta **`saidas_cap11/`** (criada dentro da pasta de trabalho) contém:
+
+| Tabelas (.csv, abrem direto no Excel) | Gráficos (.png) |
+|---|---|
+| `01_resumo_departamentos` | `g01` distribuição do turnover |
+| `02_raio_x_dimensoes` | `g02` turnover por departamento |
+| `03_comparacao_modelos` | `g03` raio-x por dimensão |
+| `04_odds_ratios` | `g04` horas extras (boxplot) |
+| `05_comparacao_cortes` | `g05` mapa de correlações |
+| `06_resumo_executivo` | `g06` curva logística em "S" |
+| `07_top10_stay_interviews` | `g07` forest plot dos odds ratios |
+| | `g08` curva ROC com ponto de Youden |
+| | `g09` matriz risco × desempenho |
+| | `g10` clima por quadrante |
+
+---
+
+## 🛠️ Problemas comuns
+
+| Sintoma | Causa | Solução |
+|---|---|---|
+| Console mostra `Browse[1]>` | O RStudio está configurado para depurar a cada erro | Digite `Q` + Enter → **Session → Restart R** → **Debug → On Error → Message Only** |
+| `Não encontrei 'Dataset_X...'` | O arquivo não está na pasta escolhida ou tem outro nome | Compare com a lista impressa na Etapa 1 e corrija o nome no **PASSO 2** |
+| `path does not exist` | O mesmo caso acima, em versões antigas do script | Use a versão 2.0 deste repositório |
+| `there is no package called ...` | Pacote não instalado (sem internet na 1ª execução) | Conecte-se à internet e rode a Etapa 0 novamente |
+| A janela de seleção não aparece | Ela pode ter aberto atrás do RStudio | Procure-a na barra de tarefas |
+| Acentos estranhos no Console | Codificação do arquivo | **File → Reopen with Encoding → UTF-8** |
+
+---
+
+## ⚖️ Limites e cuidados éticos
+
+- **Associação não é causa.** Um fator ligado à saída não prova que ele provoque a saída.
+- **Amostra pequena.** São 72 saídas voluntárias, então os intervalos de confiança são largos.
+- **Viés do tempo de casa.** Quem saiu teve, por definição, menos tempo de observação. O próximo passo natural é a **Análise de Sobrevivência** (Kaplan-Meier, Cox).
+- **LGPD e Privacy by Design.** Nomes são removidos já na integração das bases. A lista de prioridades usa apenas a matrícula e serve como **apoio a conversas (stay interviews)**, nunca como base para punição ou decisão automatizada sobre uma pessoa.
+
+---
+
+## 📜 Licença e citação
+
+Material disponibilizado sob licença **Creative Commons**, livre para uso educacional e acadêmico em cursos de graduação, pós-graduação e MBA, desde que citada a fonte:
+
+> ASSI, Ilton Luiz. People Analytics. In: *Gestão de Pessoas nas Empresas Contemporâneas Brasileiras*. 2. ed. Rio de Janeiro: GEN, cap. 11.
+
+**Dúvidas ou sugestões?** Abra uma *Issue* neste repositório.
+
+**Autor:** Ilton Luiz Assi · [LinkedIn](https://www.linkedin.com/in/iltonassi)
