@@ -1,1 +1,962 @@
+# ==============================================================================
+# PEOPLE ANALYTICS NA PRÁTICA - CAPÍTULO 11
+# SCRIPT : analise_turnover.R  (versão 2.0 - revisada e testada)
+# AUTOR  : Ilton Luiz Assi
+#
+# A PERGUNTA DO CAPÍTULO
+#   "Um hospital perde enfermeiros por vontade própria. Quem tem mais chance de
+#    sair, por quê, e onde o RH deve agir primeiro?"
+#
+# A JORNADA (do básico ao avançado)
+#   ETAPA 0  Preparar o ambiente ........................ (pacotes e funções de apoio)
+#   ETAPA 1  Importar as 6 bases ........................ (CSV ou Excel, sem erro)
+#   ETAPA 2  Detetive de dados .......................... (4 armadilhas escondidas)
+#   ETAPA 3  Construir indicadores por dimensão ......... (feature engineering)
+#   ETAPA 4  Integrar tudo em uma base analítica ........ (com LGPD)
+#   ETAPA 5  Retrato geral do turnover .................. (estatística descritiva)
+#   ETAPA 6  Raio-X por dimensão ........................ (a diferença é real ou acaso?)
+#   ETAPA 7  Variáveis que "dizem a mesma coisa" ........ (correlação)
+#   ETAPA 8  Primeiro modelo: uma única variável ........ (regressão logística simples)
+#   ETAPA 9  Modelo completo e modelo enxuto ............ (regressão múltipla + stepwise)
+#   ETAPA 10 Traduzindo para o RH ....................... (odds ratios)
+#   ETAPA 11 O modelo acerta? ........................... (matriz de confusão, ROC, Youden)
+#   ETAPA 12 O resultado se sustenta? ................... (validação cruzada)
+#   ETAPA 13 Do modelo à decisão ........................ (matriz risco x desempenho)
+#   ETAPA 14 Limites e cuidados éticos
+#
+# COMO USAR: rode etapa por etapa (Ctrl+Enter no RStudio) e leia as saídas.
+# Todas as tabelas e gráficos também são salvos na pasta "saidas_cap11".
+# ==============================================================================
 
+
+# ==============================================================================
+# ETAPA 0 - PREPARAR O AMBIENTE
+# ==============================================================================
+rm(list = ls())        # limpa objetos antigos da memória
+options(error = NULL)   # se der erro, só mostra a mensagem (não entra no modo "Browse")
+options(scipen = 999)  # evita notação científica (1.5e+04)
+set.seed(2026)         # mesma semente = mesmos resultados para toda a turma
+
+pacotes <- c(
+  "tidyverse",  # manipulação de dados (dplyr, tidyr, readr, stringr) e gráficos (ggplot2)
+  "readxl",     # leitura de planilhas Excel
+  "caret",      # divisão treino/teste, matriz de confusão e validação cruzada
+  "pROC",       # curva ROC, AUC e ponto de corte de Youden
+  "broom",      # transforma resultados de modelos em tabelas organizadas
+  "car"         # diagnóstico de multicolinearidade (VIF)
+)
+
+faltando <- pacotes[!pacotes %in% rownames(installed.packages())]
+if (length(faltando) > 0) install.packages(faltando, dependencies = TRUE)
+invisible(lapply(pacotes, library, character.only = TRUE))
+
+# Pasta onde tabelas e gráficos serão salvos
+pasta_saida <- "saidas_cap11"
+dir.create(pasta_saida, showWarnings = FALSE)
+
+# ---- Funções de apoio (escritas uma vez, usadas o capítulo inteiro) ----------
+
+# Imprime um título bem visível no Console
+titulo <- function(texto) {
+  cat("\n", strrep("=", 78), "\n ", texto, "\n", strrep("=", 78), "\n", sep = "")
+}
+
+# Imprime uma "leitura" em linguagem simples, para quem não é estatístico
+leitura <- function(...) cat("\n>> LEITURA:", ..., "\n")
+
+# Mostra tabelas inteiras, sem cortar colunas
+mostrar <- function(tabela) print(as.data.frame(tabela), row.names = FALSE)
+
+# Formata números no padrão brasileiro: 1.234,5
+br <- function(x, casas = 1) formatC(x, format = "f", digits = casas, big.mark = ".", decimal.mark = ",")
+
+# Formata p-valores: "< 0,0001" ou "0,0318"
+formatar_p <- function(p) if_else(p < 0.0001, "< 0,0001", br(p, 4))
+p_frase    <- function(p) if_else(p < 0.0001, "p < 0,0001", paste("p =", br(p, 4)))
+
+# Padroniza nomes de colunas: "Employee_ID" -> "employee_id"
+padronizar_nomes <- function(dados) {
+  rename_with(dados, ~ .x %>%
+    str_trim() %>%
+    str_to_lower() %>%
+    str_replace_all("[^a-z0-9]+", "_") %>%
+    str_remove_all("^_|_$"))
+}
+
+# Converte texto em número aceitando "75383.59" e "75383,59"
+para_numero <- function(x) {
+  if (is.numeric(x)) return(x)
+  as.numeric(str_replace(str_trim(as.character(x)), ",", "."))
+}
+
+# Converte datas vindas do Excel, de "2024-05-05" ou de "05/05/2024"
+para_data <- function(x) {
+  if (inherits(x, "Date"))   return(x)
+  if (inherits(x, "POSIXt")) return(as.Date(x))
+  x   <- as.character(x)
+  out <- as.Date(x, format = "%Y-%m-%d")
+  sem_data <- is.na(out) & !is.na(x)
+  out[sem_data] <- as.Date(x[sem_data], format = "%d/%m/%Y")
+  out
+}
+
+# Compara Retidos x Saídas Voluntárias em várias variáveis numéricas.
+# Usa o teste de Mann-Whitney: não exige distribuição normal.
+comparar_grupos <- function(dados, rotulos) {
+  map_dfr(names(rotulos), function(v) {
+    ret <- dados[[v]][dados$status == "Retido"]
+    sai <- dados[[v]][dados$status == "Turnover"]
+    p   <- wilcox.test(sai, ret, exact = FALSE)$p.value
+    tibble(
+      indicador        = rotulos[[v]],
+      media_retidos    = round(mean(ret, na.rm = TRUE), 2),
+      media_turnover   = round(mean(sai, na.rm = TRUE), 2),
+      diferenca_pct    = round((mean(sai, na.rm = TRUE) / mean(ret, na.rm = TRUE) - 1) * 100, 1),
+      p_valor          = formatar_p(p),
+      veredito         = if_else(p < 0.05, "DIFERENÇA REAL", "pode ser acaso")
+    )
+  })
+}
+
+# Gera a leitura automática da dimensão: destaca a maior diferença confiável
+ler_dimensao <- function(tabela, nome_dimensao) {
+  reais <- filter(tabela, veredito == "DIFERENÇA REAL")
+  if (nrow(reais) == 0) {
+    leitura(sprintf("%s: nenhuma diferença confiável entre quem fica e quem sai.", nome_dimensao))
+  } else {
+    top <- slice_max(reais, abs(diferenca_pct), n = 1, with_ties = FALSE)
+    leitura(sprintf("%s: o sinal mais forte é '%s'. Quem saiu tem média %s vs. %s de quem ficou (%s%%).",
+                    nome_dimensao, top$indicador, br(top$media_turnover, 2), br(top$media_retidos, 2),
+                    br(top$diferenca_pct)))
+  }
+}
+
+# Tema visual único para todos os gráficos
+tema_cap11 <- theme_minimal(base_size = 12) +
+  theme(plot.title = element_text(face = "bold"), legend.position = "bottom")
+cores_status <- c("Retido" = "#2C3E50", "Turnover" = "#E74C3C")
+
+salvar_grafico <- function(grafico, nome, largura = 9, altura = 6) {
+  print(grafico)
+  ggsave(file.path(pasta_saida, nome), grafico, width = largura, height = altura, dpi = 150)
+}
+
+titulo("ETAPA 0 CONCLUÍDA: ambiente pronto")
+
+
+# ==============================================================================
+# ETAPA 1 - IMPORTAR AS 6 BASES
+# ==============================================================================
+# ------------------------------------------------------------------------------
+# PASSO 1 - INDIQUE ONDE ESTÃO OS ARQUIVOS (sem digitar nenhum caminho C:/...)
+# ------------------------------------------------------------------------------
+#   Ao rodar a linha abaixo, abre-se uma janela do Windows/Mac.
+#   Navegue até a pasta onde salvou as 6 bases e clique em QUALQUER UM dos arquivos.
+#   O R guarda a PASTA desse arquivo e usa essa pasta para ler todas as bases.
+pasta_dados <- dirname(file.choose())
+
+titulo("ETAPA 1: importando as 6 bases do ecossistema hospitalar")
+cat("Pasta escolhida:", pasta_dados, "\n\n")
+cat("Arquivos encontrados nessa pasta:\n")
+print(list.files(pasta_dados))
+
+# ------------------------------------------------------------------------------
+# PASSO 2 - NOME E EXTENSÃO DE CADA BASE (.xlsx ou .csv)
+# ------------------------------------------------------------------------------
+#   Os nomes abaixo são os do repositório do GitHub. Compare com a lista impressa
+#   acima. Se o seu arquivo tiver outro nome ou outra extensão, corrija AQUI.
+#   Se a extensão indicada não existir, o R procura a outra (.csv <-> .xlsx) e avisa.
+arquivos <- c(
+  master     = "Dataset_1_Employee_Master com nomes.csv",  # cadastro, salário, desempenho
+  engagement = "Dataset_2_Engagement_Survey.csv",      # pesquisa de clima
+  shifts     = "Dataset_3_Shift_Schedule.csv",          # escalas e horas extras
+  promotions = "Dataset_4_Promotion_History.csv",       # promoções
+  commute    = "Dataset_5_Commute_Data.csv",            # deslocamento
+  ratios     = "Dataset_6_Patient_Ratios.csv"           # pacientes por enfermeiro
+)
+
+# Confere se cada arquivo existe. Se não existir com a extensão indicada,
+# tenta a outra extensão. Se não existir de jeito nenhum, para com mensagem clara.
+for (base in names(arquivos)) {
+  nome <- arquivos[[base]]
+  if (!file.exists(file.path(pasta_dados, nome))) {
+    alternativo <- ifelse(str_detect(nome, "\\.csv$"),
+                          str_replace(nome, "\\.csv$", ".xlsx"),
+                          str_replace(nome, "\\.xlsx?$", ".csv"))
+    if (file.exists(file.path(pasta_dados, alternativo))) {
+      cat("Aviso:", nome, "não existe; usando", alternativo, "\n")
+      arquivos[[base]] <- alternativo
+    } else {
+      stop("\nNão encontrei '", nome, "' nem '", alternativo, "' na pasta escolhida.\n",
+           "Compare com a lista de arquivos impressa acima e corrija o nome no PASSO 2.",
+           call. = FALSE)
+    }
+  }
+}
+
+# ------------------------------------------------------------------------------
+# PASSO 3 - LEITURA: cada extensão tem a sua função
+# ------------------------------------------------------------------------------
+#   .xlsx                    -> read_excel()
+#   .csv com ponto e vírgula -> read_delim(";")  (padrão brasileiro)
+#   .csv com vírgula         -> read_csv()       (padrão internacional, ponto decimal)
+ler_arquivo <- function(nome_arquivo) {
+  caminho <- file.path(pasta_dados, nome_arquivo)
+  if (str_detect(tolower(nome_arquivo), "\\.xlsx?$")) {
+    dados <- read_excel(caminho)
+  } else if (str_detect(readLines(caminho, n = 1, warn = FALSE), ";")) {
+    # lê tudo como texto e converte depois: funciona com "8,0" e com "8.0"
+    dados <- read_delim(caminho, delim = ";", show_col_types = FALSE,
+                        col_types = cols(.default = col_character())) %>%
+      mutate(across(everything(), ~ if (all(str_detect(na.omit(.x), "^-?[0-9]+([.,][0-9]+)?$")))
+                                      para_numero(.x) else .x))
+  } else {
+    dados <- read_csv(caminho, show_col_types = FALSE)
+  }
+  padronizar_nomes(dados)
+}
+
+df_master     <- ler_arquivo(arquivos[["master"]])
+df_engagement <- ler_arquivo(arquivos[["engagement"]])
+df_shifts     <- ler_arquivo(arquivos[["shifts"]])
+df_promotions <- ler_arquivo(arquivos[["promotions"]])
+df_commute    <- ler_arquivo(arquivos[["commute"]])
+df_ratios     <- ler_arquivo(arquivos[["ratios"]])
+
+# Conferência: quantas linhas e colunas vieram de cada base
+print(tibble(
+  base    = names(arquivos),
+  arquivo = arquivos,
+  linhas  = c(nrow(df_master), nrow(df_engagement), nrow(df_shifts),
+              nrow(df_promotions), nrow(df_commute), nrow(df_ratios)),
+  colunas = c(ncol(df_master), ncol(df_engagement), ncol(df_shifts),
+              ncol(df_promotions), ncol(df_commute), ncol(df_ratios))
+))
+
+leitura("seis fontes diferentes, de sistemas diferentes, ligadas por uma única chave: 'employee_id'.")
+
+
+# ==============================================================================
+# ETAPA 2 - DETETIVE DE DADOS: AS 4 ARMADILHAS
+# ==============================================================================
+# Antes de qualquer estatística, desconfie dos dados. Aqui há 4 armadilhas
+# reais que, se ignoradas, produzem um modelo errado SEM nenhuma mensagem de erro.
+titulo("ETAPA 2: detetive de dados - procurando armadilhas")
+
+# --- Armadilha 1: números guardados como texto --------------------------------
+cat("\n[Armadilha 1] Que tipo de dado o R enxergou nestas colunas?\n")
+print(sapply(df_master[c("base_salary", "tenure_months", "performance_rating")], class))
+if (any(sapply(df_master[c("base_salary", "tenure_months", "performance_rating")], is.character))) {
+  leitura("salário e desempenho chegaram como TEXTO. O modelo trataria cada salário",
+          "como uma categoria diferente! Convertendo para número agora.")
+} else {
+  leitura("nesta importação os números já chegaram como número. Mesmo assim, garantimos a conversão:",
+          "no Excel do repositório eles vêm como TEXTO, e o modelo trataria cada salário como uma categoria.")
+}
+
+df_master <- df_master %>%
+  mutate(
+    across(any_of(c("age", "tenure_months", "base_salary", "performance_rating")), para_numero),
+    across(any_of(c("hire_date", "termination_date")), para_data)
+  )
+df_engagement <- df_engagement %>%
+  mutate(across(-any_of(c("employee_id", "survey_date")), para_numero))
+df_shifts <- df_shifts %>%
+  mutate(shift_date = para_data(shift_date),
+         across(c(hours_worked, overtime_hours), para_numero))
+df_promotions <- df_promotions %>% mutate(effective_date = para_data(effective_date))
+
+# --- Armadilha 2: qual é a "data de hoje" da base? ----------------------------
+data_referencia <- max(df_shifts$shift_date, na.rm = TRUE)
+cat("\n[Armadilha 2] Última escala registrada:", format(data_referencia, "%d/%m/%Y"), "\n")
+leitura("esta é a 'fotografia' da base. Tudo que acontecer depois dela é futuro e não pode",
+        "ser usado para explicar o passado.")
+
+# --- Armadilha 3: tempo de casa dos desligados --------------------------------
+checagem_tenure <- df_master %>%
+  filter(employment_status == "Terminated") %>%
+  mutate(fim_implicito = hire_date + tenure_months * 30.44)
+cat("\n[Armadilha 3] Data final implícita no 'tenure_months' de quem JÁ SAIU:\n")
+print(summary(checagem_tenure$fim_implicito))
+leitura("o tempo de casa dos desligados foi contado até", format(data_referencia, "%m/%Y"),
+        "e não até a data de saída. Vamos recalcular: admissão -> saída (ou data de referência).")
+
+# --- Armadilha 4: registros do futuro e lacunas -------------------------------
+promocoes_futuras <- sum(df_promotions$effective_date > data_referencia, na.rm = TRUE)
+cat("\n[Armadilha 4a] Promoções com data posterior à referência:", promocoes_futuras, "\n")
+
+cobertura <- df_master %>%
+  mutate(tem_escala = employee_id %in% df_shifts$employee_id,
+         tem_pesquisa = employee_id %in% df_engagement$employee_id) %>%
+  group_by(employment_status, termination_type) %>%
+  summarise(pessoas = n(),
+            pct_com_escala   = round(mean(tem_escala) * 100, 1),
+            pct_com_pesquisa = round(mean(tem_pesquisa) * 100, 1),
+            .groups = "drop")
+cat("\n[Armadilha 4b] Cobertura das bases auxiliares por situação:\n")
+print(cobertura)
+leitura("promoções futuras serão descartadas e quem não tem escala receberá a mediana do grupo.",
+        "A pesquisa de clima fica FORA do modelo: usá-la seria 'vazamento de dados'.")
+
+
+# ==============================================================================
+# ETAPA 3 - CONSTRUIR INDICADORES POR DIMENSÃO (FEATURE ENGINEERING)
+# ==============================================================================
+# Transformamos milhares de linhas em UM retrato por colaborador.
+titulo("ETAPA 3: construindo indicadores por dimensão")
+
+# Dimensão JORNADA (Dataset 3): 58 mil escalas viram 1 linha por pessoa
+features_jornada <- df_shifts %>%
+  group_by(employee_id) %>%
+  summarise(
+    total_turnos        = n(),
+    media_horas_turno   = mean(hours_worked, na.rm = TRUE),
+    media_horas_extras  = mean(overtime_hours, na.rm = TRUE),
+    pct_turnos_noturnos = mean(shift_type == "Night", na.rm = TRUE) * 100,
+    pct_dias_hora_extra = mean(overtime_hours > 0, na.rm = TRUE) * 100,
+    .groups = "drop"
+  )
+
+# Dimensão SOBRECARGA ASSISTENCIAL (Dataset 6)
+features_sobrecarga <- df_ratios %>%
+  distinct(employee_id, .keep_all = TRUE) %>%
+  select(employee_id, avg_patient_nurse_ratio, max_patient_nurse_ratio)
+
+# Dimensão DESLOCAMENTO (Dataset 5)
+features_deslocamento <- df_commute %>%
+  distinct(employee_id, .keep_all = TRUE) %>%
+  select(employee_id, commute_distance_miles, estimated_commute_time_minutes)
+
+# Dimensão CLIMA (Dataset 2) - usada só no diagnóstico final, nunca no modelo
+itens_clima <- c("overall_satisfaction", "manager_effectiveness", "work_life_balance",
+                 "career_development", "compensation_satisfaction",
+                 "workload_manageability", "team_collaboration", "recognition")
+features_clima <- df_engagement %>%
+  distinct(employee_id, .keep_all = TRUE) %>%
+  mutate(indice_clima_geral = rowMeans(pick(any_of(itens_clima)), na.rm = TRUE)) %>%
+  select(employee_id, any_of(itens_clima), indice_clima_geral)
+
+cat("Indicadores criados:\n")
+cat("  Jornada .......", ncol(features_jornada) - 1, "indicadores para", nrow(features_jornada), "pessoas\n")
+cat("  Sobrecarga ....", ncol(features_sobrecarga) - 1, "indicadores para", nrow(features_sobrecarga), "pessoas\n")
+cat("  Deslocamento ..", ncol(features_deslocamento) - 1, "indicadores para", nrow(features_deslocamento), "pessoas\n")
+cat("  Clima .........", ncol(features_clima) - 1, "indicadores para", nrow(features_clima), "pessoas\n")
+# A dimensão CARREIRA depende da data de saída de cada um; é construída na Etapa 4.
+
+
+# ==============================================================================
+# ETAPA 4 - INTEGRAR TUDO EM UMA BASE ANALÍTICA (COM LGPD)
+# ==============================================================================
+titulo("ETAPA 4: integrando as bases")
+
+df_analitico <- df_master %>%
+  distinct(employee_id, .keep_all = TRUE) %>%
+  # Ativos + saídas VOLUNTÁRIAS. Demissões pela empresa são outro fenômeno.
+  filter(employment_status == "Active" |
+         (employment_status == "Terminated" & termination_type == "Voluntary")) %>%
+  # LGPD / Privacy by Design: nomes não servem à análise, então saem já aqui
+  select(-any_of(c("first_name", "last_name"))) %>%
+  mutate(
+    turnover_voluntario = if_else(employment_status == "Terminated", 1, 0),
+    status              = factor(turnover_voluntario, levels = c(0, 1), labels = c("Retido", "Turnover")),
+    data_fim_observacao = coalesce(termination_date, data_referencia),
+    # Correção da Armadilha 3: tempo de casa até a saída (ou até a referência)
+    tempo_casa_meses    = round(as.numeric(data_fim_observacao - hire_date) / 30.44, 1),
+    salario_mil         = base_salary / 1000   # em milhares: facilita a leitura do odds ratio
+  )
+
+# Dimensão CARREIRA: só vale o que aconteceu ATÉ a saída/referência (Armadilha 4a)
+features_carreira <- df_promotions %>%
+  inner_join(select(df_analitico, employee_id, data_fim_observacao), by = "employee_id") %>%
+  filter(effective_date <= data_fim_observacao) %>%
+  group_by(employee_id) %>%
+  summarise(
+    qtd_promocoes_internas   = sum(promotion_type == "Internal Promotion"),
+    data_ultima_movimentacao = max(effective_date),
+    .groups = "drop"
+  )
+
+df_analitico <- df_analitico %>%
+  left_join(features_jornada,      by = "employee_id") %>%
+  left_join(features_carreira,     by = "employee_id") %>%
+  left_join(features_deslocamento, by = "employee_id") %>%
+  left_join(features_sobrecarga,   by = "employee_id") %>%
+  left_join(features_clima,        by = "employee_id") %>%
+  mutate(
+    data_ultima_movimentacao    = coalesce(data_ultima_movimentacao, hire_date),
+    qtd_promocoes_internas      = coalesce(qtd_promocoes_internas, 0L),
+    meses_desde_ultima_promocao = round(as.numeric(data_fim_observacao - data_ultima_movimentacao) / 30.44, 1),
+    # Zero ESTRUTURAL: a Administração não atende pacientes
+    avg_patient_nurse_ratio = coalesce(avg_patient_nurse_ratio, 0),
+    max_patient_nurse_ratio = coalesce(max_patient_nurse_ratio, 0),
+    # Lacuna de escala: preenchemos com a mediana (não com zero, que seria falso)
+    across(c(total_turnos, media_horas_turno, media_horas_extras,
+             pct_turnos_noturnos, pct_dias_hora_extra),
+           ~ coalesce(.x, median(.x, na.rm = TRUE)))
+  )
+
+cat("Base analítica:", nrow(df_analitico), "colaboradores |", ncol(df_analitico), "colunas\n")
+leitura("cada linha agora é uma pessoa, com jornada, carreira, deslocamento, sobrecarga e clima lado a lado.")
+
+
+# ==============================================================================
+# ETAPA 5 - RETRATO GERAL DO TURNOVER (ESTATÍSTICA DESCRITIVA)
+# ==============================================================================
+titulo("ETAPA 5: retrato geral do turnover voluntário")
+
+distribuicao <- df_analitico %>%
+  count(status, name = "pessoas") %>%
+  mutate(percentual = round(pessoas / sum(pessoas) * 100, 1))
+mostrar(distribuicao)
+taxa_geral <- mean(df_analitico$turnover_voluntario) * 100
+leitura(sprintf("%s%% saíram por vontade própria. Para cada pessoa que saiu, %s ficaram.",
+                br(taxa_geral), br((100 - taxa_geral) / taxa_geral)),
+        "Classes desbalanceadas: guarde isso, vai importar na Etapa 11.")
+
+resumo_depto <- df_analitico %>%
+  group_by(department) %>%
+  summarise(
+    headcount          = n(),
+    saidas_voluntarias = sum(turnover_voluntario),
+    taxa_turnover_pct  = round(mean(turnover_voluntario) * 100, 1),
+    media_horas_extras = round(mean(media_horas_extras), 2),
+    pct_noturno        = round(mean(pct_turnos_noturnos), 1),
+    ratio_max_paciente = round(mean(max_patient_nurse_ratio), 2),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(taxa_turnover_pct))
+cat("\nDiagnóstico por departamento:\n")
+mostrar(resumo_depto)
+write_excel_csv2(resumo_depto, file.path(pasta_saida, "01_resumo_departamentos.csv"))
+leitura(sprintf("'%s' lidera com %s%% de turnover; '%s' tem a menor taxa (%s%%).",
+                resumo_depto$department[1], br(resumo_depto$taxa_turnover_pct[1]),
+                last(resumo_depto$department), br(last(resumo_depto$taxa_turnover_pct))),
+        "A diferença parece grande... mas será real? A Etapa 6 responde.")
+
+g1 <- ggplot(distribuicao, aes(x = status, y = pessoas, fill = status)) +
+  geom_col(width = 0.5, show.legend = FALSE) +
+  geom_text(aes(label = paste0(pessoas, " (", percentual, "%)")), vjust = -0.5, fontface = "bold") +
+  scale_fill_manual(values = cores_status) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.12))) +
+  labs(title = "Quantos ficaram e quantos saíram por vontade própria?",
+       subtitle = "Ativos vs. desligamentos voluntários", x = NULL, y = "Colaboradores") +
+  tema_cap11
+salvar_grafico(g1, "g01_distribuicao_turnover.png", 7, 5)
+
+g2 <- ggplot(resumo_depto, aes(x = reorder(department, taxa_turnover_pct), y = taxa_turnover_pct)) +
+  geom_col(fill = "#E74C3C", width = 0.6) +
+  geom_hline(yintercept = taxa_geral, linetype = "dashed") +
+  geom_text(aes(label = paste0(taxa_turnover_pct, "%")), hjust = -0.2) +
+  annotate("text", x = 0.6, y = taxa_geral, label = "média geral", hjust = -0.1, vjust = -0.5, size = 3.5) +
+  coord_flip() +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.15))) +
+  labs(title = "Onde o turnover voluntário é maior?", x = NULL, y = "Taxa de turnover voluntário (%)") +
+  tema_cap11
+salvar_grafico(g2, "g02_turnover_departamento.png")
+
+
+# ==============================================================================
+# ETAPA 6 - RAIO-X POR DIMENSÃO: A DIFERENÇA É REAL OU ACASO?
+# ==============================================================================
+# Para cada dimensão, comparamos quem ficou com quem saiu.
+# p_valor < 0,05 -> é pouco provável que a diferença seja fruto do acaso.
+titulo("ETAPA 6: raio-x por dimensão")
+
+dimensoes <- list(
+  "PERFIL" = c(age = "Idade (anos)", tempo_casa_meses = "Tempo de casa (meses)",
+               salario_mil = "Salário anual (mil)", performance_rating = "Avaliação de desempenho"),
+  "JORNADA" = c(media_horas_extras = "Horas extras por turno", pct_turnos_noturnos = "% turnos noturnos",
+                pct_dias_hora_extra = "% de turnos com hora extra", media_horas_turno = "Horas por turno"),
+  "CARREIRA" = c(qtd_promocoes_internas = "Nº de promoções internas",
+                 meses_desde_ultima_promocao = "Meses sem promoção"),
+  "DESLOCAMENTO" = c(estimated_commute_time_minutes = "Tempo de deslocamento (min)",
+                     commute_distance_miles = "Distância (milhas)"),
+  "SOBRECARGA" = c(avg_patient_nurse_ratio = "Pacientes por profissional (média)",
+                   max_patient_nurse_ratio = "Pacientes por profissional (pico)")
+)
+
+raio_x <- imap_dfr(dimensoes, function(rotulos, nome) {
+  cat("\n---", nome, strrep("-", 70 - nchar(nome)), "\n")
+  tabela <- comparar_grupos(df_analitico, rotulos)
+  mostrar(tabela)
+  ler_dimensao(tabela, nome)
+  mutate(tabela, dimensao = nome, .before = 1)
+})
+write_excel_csv2(raio_x, file.path(pasta_saida, "02_raio_x_dimensoes.csv"))
+
+# Variáveis categóricas: o teste qui-quadrado responde a mesma pergunta
+cat("\n--- PERFIL (categóricas) ---------------------------------------------\n")
+for (v in c("gender", "department")) {
+  tab <- table(df_analitico[[v]], df_analitico$status)
+  p   <- chisq.test(tab, simulate.p.value = TRUE, B = 5000)$p.value
+  cat(sprintf("%-11s qui-quadrado p = %s -> %s\n", v, formatar_p(p),
+              if_else(p < 0.05, "a taxa de turnover MUDA entre os grupos",
+                      "as diferenças entre os grupos podem ser acaso")))
+  if (v == "department" && p >= 0.05) {
+    leitura("lembra da diferença entre departamentos na Etapa 5? Com estes tamanhos de equipe,",
+            "ela pode ser acaso. Olhar só percentuais engana; o teste estatístico protege a decisão.")
+  }
+}
+
+reais <- filter(raio_x, veredito == "DIFERENÇA REAL")
+leitura(sprintf("de %d indicadores testados, %d mostram diferença real: %s.",
+                nrow(raio_x), nrow(reais), paste(reais$indicador, collapse = "; ")))
+
+# Gráfico: os sinais mais fortes de cada dimensão lado a lado
+g3 <- raio_x %>%
+  mutate(indicador = fct_reorder(indicador, diferenca_pct),
+         sinal = if_else(veredito == "DIFERENÇA REAL", "Diferença real (p < 0,05)", "Pode ser acaso")) %>%
+  ggplot(aes(x = indicador, y = diferenca_pct, fill = sinal)) +
+  geom_col(width = 0.7) +
+  geom_hline(yintercept = 0) +
+  coord_flip() +
+  facet_grid(dimensao ~ ., scales = "free_y", space = "free_y") +
+  scale_fill_manual(values = c("Diferença real (p < 0,05)" = "#C0392B", "Pode ser acaso" = "#BDC3C7")) +
+  labs(title = "Quem sai é diferente de quem fica? Raio-x por dimensão",
+       subtitle = "Diferença (%) da média de quem saiu em relação à média de quem ficou",
+       x = NULL, y = "Diferença em relação aos retidos (%)", fill = NULL) +
+  tema_cap11 + theme(strip.text.y = element_text(angle = 0, face = "bold"))
+salvar_grafico(g3, "g03_raio_x_dimensoes.png", 10, 8)
+
+g4 <- ggplot(df_analitico, aes(x = status, y = media_horas_extras, fill = status)) +
+  geom_boxplot(alpha = 0.85, show.legend = FALSE, outlier.alpha = 0.4) +
+  stat_summary(fun = mean, geom = "point", shape = 18, size = 4, color = "gold") +
+  scale_fill_manual(values = cores_status) +
+  labs(title = "Horas extras: quem sai trabalhava mais?",
+       subtitle = sprintf("Média de horas extras por turno (%s escalas analisadas; losango = média)",
+                          br(nrow(df_shifts), 0)),
+       x = NULL, y = "Horas extras por turno") +
+  tema_cap11
+salvar_grafico(g4, "g04_horas_extras.png", 7, 5)
+
+
+# ==============================================================================
+# ETAPA 7 - VARIÁVEIS QUE "DIZEM A MESMA COISA" (CORRELAÇÃO)
+# ==============================================================================
+# Se duas variáveis contam a mesma história, o modelo fica confuso sobre qual
+# delas "merece o crédito". Vamos procurar pares com correlação acima de 0,70.
+titulo("ETAPA 7: procurando variáveis redundantes")
+
+candidatas <- c("age", "tempo_casa_meses", "salario_mil", "performance_rating",
+                "media_horas_extras", "pct_turnos_noturnos", "pct_dias_hora_extra",
+                "qtd_promocoes_internas", "meses_desde_ultima_promocao",
+                "estimated_commute_time_minutes", "commute_distance_miles",
+                "avg_patient_nurse_ratio", "max_patient_nurse_ratio")
+matriz_cor <- cor(df_analitico[candidatas], use = "pairwise.complete.obs")
+
+pares_redundantes <- as_tibble(matriz_cor, rownames = "var_1") %>%
+  pivot_longer(-var_1, names_to = "var_2", values_to = "r") %>%
+  filter(var_1 < var_2, abs(r) > 0.70) %>%
+  mutate(r = round(r, 3)) %>%
+  arrange(desc(abs(r)))
+mostrar(pares_redundantes)
+leitura(sprintf("%d pares têm r acima de 0,90: praticamente gêmeos.", sum(abs(pares_redundantes$r) > 0.90)),
+        "No modelo fica só um de cada: horas extras (sai % noturno), tempo de deslocamento",
+        "(sai distância) e pico de pacientes (sai a média). Os pares entre 0,70 e 0,90 ficam,",
+        "mas serão vigiados pelo VIF na Etapa 9.")
+
+g5 <- as_tibble(matriz_cor, rownames = "var_1") %>%
+  pivot_longer(-var_1, names_to = "var_2", values_to = "r") %>%
+  ggplot(aes(var_1, var_2, fill = r)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = sprintf("%.2f", r)), size = 2.6) +
+  scale_fill_gradient2(low = "#2E86C1", mid = "white", high = "#C0392B", limits = c(-1, 1)) +
+  labs(title = "Mapa de correlações entre os indicadores", x = NULL, y = NULL, fill = "r") +
+  tema_cap11 + theme(axis.text.x = element_text(angle = 45, hjust = 1))
+salvar_grafico(g5, "g05_mapa_correlacoes.png", 10, 9)
+
+
+# ==============================================================================
+# ETAPA 8 - PRIMEIRO MODELO: UMA ÚNICA VARIÁVEL
+# ==============================================================================
+# Antes do modelo completo, uma pergunta simples:
+# "Só sabendo as horas extras de alguém, consigo estimar a chance de ele sair?"
+titulo("ETAPA 8: regressão logística simples (só horas extras)")
+
+variaveis_modelo <- c("status", "gender", "age", "tempo_casa_meses", "department",
+                      "salario_mil", "performance_rating", "media_horas_extras",
+                      "qtd_promocoes_internas", "meses_desde_ultima_promocao",
+                      "estimated_commute_time_minutes", "max_patient_nurse_ratio")
+
+df_modelo <- df_analitico %>%
+  select(employee_id, all_of(variaveis_modelo)) %>%
+  mutate(across(c(gender, department), as.factor)) %>%
+  drop_na()
+
+# Divisão estratificada: 75% para o modelo aprender, 25% para testarmos depois
+idx_treino <- createDataPartition(df_modelo$status, p = 0.75, list = FALSE)
+treino <- df_modelo[idx_treino, ]  %>% select(-employee_id)
+teste  <- df_modelo[-idx_treino, ] %>% select(-employee_id)
+cat("Treino:", nrow(treino), "pessoas | Teste:", nrow(teste), "pessoas",
+    sprintf("(turnover: %s%% no treino e %s%% no teste)\n",
+            br(mean(treino$status == "Turnover") * 100), br(mean(teste$status == "Turnover") * 100)))
+
+modelo_simples <- glm(status ~ media_horas_extras, data = treino, family = binomial)
+res_he <- tidy(modelo_simples, exponentiate = TRUE, conf.int = TRUE) %>%
+  filter(term == "media_horas_extras")
+mostrar(res_he %>% mutate(across(where(is.numeric), ~ round(.x, 3))))
+
+cenarios <- tibble(media_horas_extras = c(0, 1, 2, 3, 4))
+cenarios$prob_saida_pct <- round(predict(modelo_simples, cenarios, type = "response") * 100, 1)
+cat("\nSimulação: probabilidade prevista de saída por nível de hora extra\n")
+mostrar(cenarios)
+
+if (res_he$p.value < 0.05) {
+  leitura(sprintf("cada hora extra a mais por turno multiplica a chance de saída por %s (%s).",
+                  br(res_he$estimate, 2), p_frase(res_he$p.value)), "A intuição se confirma.")
+} else {
+  leitura(sprintf("SURPRESA! A curva sobe, mas o intervalo de confiança do odds ratio vai de %s a %s",
+                  br(res_he$conf.low, 2), br(res_he$conf.high, 2)),
+          sprintf("e inclui o 1 (= nenhum efeito). Com %s, a hipótese 'horas extras explicam a",
+                  p_frase(res_he$p.value)),
+          "saída' NÃO se sustenta nesta base. É por isso que testamos a intuição antes de agir.")
+}
+
+g6 <- ggplot(treino, aes(x = media_horas_extras, y = as.numeric(status == "Turnover"))) +
+  geom_jitter(height = 0.04, width = 0, alpha = 0.3, color = "#2C3E50") +
+  geom_smooth(method = "glm", method.args = list(family = binomial), formula = y ~ x,
+              color = "#E74C3C", fill = "#F5B7B1", linewidth = 1.2) +
+  labs(title = "A curva em 'S' da regressão logística",
+       subtitle = "Cada ponto é uma pessoa (0 = ficou, 1 = saiu). A curva é a probabilidade estimada.",
+       x = "Horas extras por turno", y = "Probabilidade de saída") +
+  tema_cap11
+salvar_grafico(g6, "g06_curva_logistica.png", 8, 5)
+
+
+# ==============================================================================
+# ETAPA 9 - MODELO COMPLETO E MODELO ENXUTO (STEPWISE)
+# ==============================================================================
+# Uma variável explica pouco. Vamos colocar todas as dimensões juntas e deixar o
+# critério AIC escolher o conjunto mais enxuto que ainda explica bem.
+titulo("ETAPA 9: regressão logística múltipla")
+
+modelo_completo <- glm(status ~ ., data = treino, family = binomial)
+modelo_final    <- step(modelo_completo, direction = "both", trace = FALSE)
+
+cat("\nVariáveis que o stepwise manteve:\n  ",
+    paste(attr(terms(modelo_final), "term.labels"), collapse = "\n   "), "\n")
+print(summary(modelo_final))
+
+pseudo_r2 <- function(m) 1 - m$deviance / m$null.deviance  # R² de McFadden
+auc_teste <- function(m) {
+  as.numeric(auc(roc(teste$status, predict(m, teste, type = "response"),
+                     levels = c("Retido", "Turnover"), direction = "<", quiet = TRUE)))
+}
+comparacao_modelos <- tibble(
+  modelo        = c("1. Simples (horas extras)", "2. Completo", "3. Final (stepwise)"),
+  n_parametros  = c(length(coef(modelo_simples)), length(coef(modelo_completo)), length(coef(modelo_final))),
+  AIC           = round(c(AIC(modelo_simples), AIC(modelo_completo), AIC(modelo_final)), 1),
+  pseudo_R2     = round(c(pseudo_r2(modelo_simples), pseudo_r2(modelo_completo), pseudo_r2(modelo_final)), 3),
+  AUC_teste     = round(c(auc_teste(modelo_simples), auc_teste(modelo_completo), auc_teste(modelo_final)), 3)
+)
+cat("\nComparação dos três modelos (AIC: menor é melhor | AUC: maior é melhor):\n")
+mostrar(comparacao_modelos)
+write_excel_csv2(comparacao_modelos, file.path(pasta_saida, "03_comparacao_modelos.csv"))
+leitura(sprintf("o modelo só com horas extras tem AUC de %s (0,50 = cara ou coroa).",
+                br(comparacao_modelos$AUC_teste[1], 2)),
+        sprintf("O modelo final usa %d parâmetros, contra %d do completo, com AUC de %s vs. %s.",
+                comparacao_modelos$n_parametros[3], comparacao_modelos$n_parametros[2],
+                br(comparacao_modelos$AUC_teste[3], 2), br(comparacao_modelos$AUC_teste[2], 2)),
+        "Menos variáveis, desempenho equivalente: em ciência, parcimônia é virtude.")
+
+if (length(attr(terms(modelo_final), "term.labels")) >= 2) {
+  cat("\nMulticolinearidade (VIF; valores abaixo de 5 = estável):\n")
+  print(round(vif(modelo_final), 2))
+}
+
+
+# ==============================================================================
+# ETAPA 10 - TRADUZINDO PARA O RH: ODDS RATIOS
+# ==============================================================================
+# Odds ratio (OR) = quanto a CHANCE de sair é multiplicada a cada +1 unidade.
+#   OR > 1  -> fator de RISCO      |  OR < 1 -> fator de PROTEÇÃO
+titulo("ETAPA 10: fatores de risco e de proteção (odds ratios)")
+
+tabela_or <- tidy(modelo_final, conf.int = TRUE, exponentiate = TRUE) %>%
+  filter(term != "(Intercept)") %>%
+  mutate(
+    variacao_chance_pct = round((estimate - 1) * 100, 1),
+    papel = if_else(estimate > 1, "RISCO", "PROTEÇÃO"),
+    significancia = case_when(
+      p.value < 0.001 ~ "***",
+      p.value < 0.01  ~ "**",
+      p.value < 0.05  ~ "*",
+      p.value < 0.10  ~ ".",
+      TRUE            ~ "ns"
+    ),
+    across(c(estimate, conf.low, conf.high), ~ round(.x, 3))
+  ) %>%
+  arrange(p.value) %>%
+  mutate(p_valor = formatar_p(p.value)) %>%
+  select(term, odds_ratio = estimate, variacao_chance_pct, ic_inferior = conf.low,
+         ic_superior = conf.high, p_valor, significancia, papel, p_num = p.value)
+mostrar(select(tabela_or, -p_num))
+write_excel_csv2(select(tabela_or, -p_num), file.path(pasta_saida, "04_odds_ratios.csv"))
+
+# Dicionário: o que significa "+1 unidade" em cada variável
+unidades <- c(
+  tempo_casa_meses               = "cada mês a mais de casa",
+  salario_mil                    = "cada 1 mil a mais de salário anual",
+  age                            = "cada ano a mais de idade",
+  performance_rating             = "cada ponto a mais na avaliação",
+  media_horas_extras             = "cada hora extra a mais por turno",
+  qtd_promocoes_internas         = "cada promoção interna a mais",
+  meses_desde_ultima_promocao    = "cada mês a mais sem promoção",
+  estimated_commute_time_minutes = "cada minuto a mais de deslocamento",
+  max_patient_nurse_ratio        = "cada paciente a mais no pico por profissional"
+)
+for (i in seq_len(nrow(tabela_or))) {
+  termo <- tabela_or$term[i]
+  quem  <- if (termo %in% names(unidades)) unidades[[termo]] else paste0("pertencer a '", termo, "' (vs. referência)")
+  leitura(sprintf("%s %s a chance de saída em %s%% (%s; %s%s).",
+                  str_to_sentence(quem),
+                  if_else(tabela_or$odds_ratio[i] > 1, "AUMENTA", "REDUZ"),
+                  br(abs(tabela_or$variacao_chance_pct[i])), tabela_or$papel[i], p_frase(tabela_or$p_num[i]),
+                  if_else(tabela_or$p_num[i] < 0.05, "", ", efeito incerto")))
+}
+leitura("atenção: o odds ratio compara pessoas IGUAIS nas demais variáveis do modelo.",
+        "Por isso pode contrariar a comparação simples da Etapa 6: uma variável sem diferença",
+        "isolada pode ganhar força quando 'controlamos' o tempo de casa, por exemplo.")
+
+g7 <- ggplot(tabela_or, aes(x = reorder(term, odds_ratio), y = odds_ratio, color = papel)) +
+  geom_hline(yintercept = 1, linetype = "dashed", color = "gray40") +
+  geom_errorbar(aes(ymin = ic_inferior, ymax = ic_superior), width = 0.2) +
+  geom_point(size = 3.5) +
+  coord_flip() +
+  scale_y_log10() +
+  scale_color_manual(values = c("RISCO" = "#C0392B", "PROTEÇÃO" = "#1E8449")) +
+  labs(title = "Direcionadores do turnover voluntário (odds ratios, IC 95%)",
+       subtitle = "À direita da linha: aumenta o risco | À esquerda: protege. Escala logarítmica.",
+       x = NULL, y = "Odds ratio", color = NULL) +
+  tema_cap11
+salvar_grafico(g7, "g07_forest_plot_odds_ratios.png")
+
+
+# ==============================================================================
+# ETAPA 11 - O MODELO ACERTA? MATRIZ DE CONFUSÃO, ROC E PONTO DE CORTE
+# ==============================================================================
+# O modelo devolve uma PROBABILIDADE. Para virar decisão ("alerta" ou "não"),
+# precisamos de um ponto de corte. O corte de 0,50 parece natural... mas será?
+titulo("ETAPA 11: avaliação no conjunto de teste")
+
+prob_teste <- predict(modelo_final, newdata = teste, type = "response")
+
+classificar <- function(prob, corte) {
+  factor(if_else(prob >= corte, "Turnover", "Retido"), levels = c("Retido", "Turnover"))
+}
+
+cm_50 <- confusionMatrix(classificar(prob_teste, 0.50), teste$status, positive = "Turnover")
+cat("\n--- MATRIZ 1: corte padrão 0,50 ---\n")
+print(cm_50$table)
+
+roc_obj   <- roc(teste$status, prob_teste, levels = c("Retido", "Turnover"), direction = "<", quiet = TRUE)
+auc_valor <- as.numeric(auc(roc_obj))
+corte_otimo <- coords(roc_obj, "best", best.method = "youden", ret = "threshold",
+                      transpose = FALSE)$threshold[1]
+
+cm_youden <- confusionMatrix(classificar(prob_teste, corte_otimo), teste$status, positive = "Turnover")
+cat(sprintf("\n--- MATRIZ 2: corte otimizado por Youden (%s) ---\n", br(corte_otimo, 3)))
+print(cm_youden$table)
+
+metricas <- function(cm, nome) {
+  tibble(corte = nome,
+         acuracia = cm$overall[["Accuracy"]],
+         sensibilidade_saidas_detectadas = cm$byClass[["Sensitivity"]],
+         especificidade_retidos_corretos = cm$byClass[["Specificity"]],
+         precisao_alertas_corretos = cm$byClass[["Pos Pred Value"]],
+         saidas_reais = sum(cm$table[, "Turnover"]),
+         saidas_detectadas = cm$table["Turnover", "Turnover"])
+}
+comparacao_cortes <- bind_rows(metricas(cm_50, "0,50 (padrão)"),
+                               metricas(cm_youden, paste(br(corte_otimo, 3), "(Youden)"))) %>%
+  mutate(across(where(is.double), ~ round(.x, 3)))
+cat("\nComparação lado a lado:\n")
+mostrar(comparacao_cortes)
+write_excel_csv2(comparacao_cortes, file.path(pasta_saida, "05_comparacao_cortes.csv"))
+
+cat(sprintf("\nAUC (área sob a curva ROC): %s\n", br(auc_valor, 3)))
+leitura(sprintf("com corte 0,50 o modelo encontra %d de %d saídas reais. Com Youden, encontra %d,",
+                comparacao_cortes$saidas_detectadas[1], comparacao_cortes$saidas_reais[1],
+                comparacao_cortes$saidas_detectadas[2]),
+        sprintf("embora a acurácia caia de %s%% para %s%%.",
+                br(comparacao_cortes$acuracia[1] * 100), br(comparacao_cortes$acuracia[2] * 100)),
+        "Com classes desbalanceadas, a acurácia engana: perder um talento custa mais que um alarme falso.")
+leitura(sprintf("AUC = %s: escolhendo ao acaso uma pessoa que saiu e uma que ficou, o modelo dá risco",
+                br(auc_valor, 2)), sprintf("maior a quem saiu em %s%% das vezes (0,5 = moeda; 1,0 = perfeito).",
+                br(auc_valor * 100, 0)))
+
+ponto_youden <- coords(roc_obj, corte_otimo, input = "threshold",
+                       ret = c("specificity", "sensitivity"), transpose = FALSE)
+g8 <- ggroc(roc_obj, color = "#2980B9", linewidth = 1.3, legacy.axes = TRUE) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "gray50") +
+  annotate("point", x = 1 - ponto_youden$specificity[1], y = ponto_youden$sensitivity[1],
+           size = 4, color = "#C0392B") +
+  annotate("text", x = 1 - ponto_youden$specificity[1], y = ponto_youden$sensitivity[1],
+           label = paste("  Youden =", br(corte_otimo, 3)), hjust = 0, vjust = 1.5, color = "#C0392B") +
+  labs(title = paste0("Curva ROC - previsão de turnover voluntário (AUC = ", br(auc_valor, 3), ")"),
+       subtitle = "Linha tracejada = acerto ao acaso", x = "1 - Especificidade (alarmes falsos)",
+       y = "Sensibilidade (saídas detectadas)") +
+  tema_cap11
+salvar_grafico(g8, "g08_curva_roc.png", 7, 6)
+
+
+# ==============================================================================
+# ETAPA 12 - O RESULTADO SE SUSTENTA? VALIDAÇÃO CRUZADA
+# ==============================================================================
+# Um único sorteio treino/teste pode dar sorte (ou azar). A validação cruzada
+# repete o processo 25 vezes (5 partes x 5 repetições) e mostra a variação.
+titulo("ETAPA 12: validação cruzada (5 partes x 5 repetições)")
+
+controle_cv <- trainControl(method = "repeatedcv", number = 5, repeats = 5,
+                            classProbs = TRUE, summaryFunction = twoClassSummary)
+modelo_cv <- train(formula(modelo_final), data = treino, method = "glm",
+                   family = binomial, metric = "ROC", trControl = controle_cv)
+
+resultado_cv <- modelo_cv$resample %>%
+  summarise(AUC_media = mean(ROC), AUC_min = min(ROC), AUC_max = max(ROC), AUC_desvio = sd(ROC)) %>%
+  mutate(across(everything(), ~ round(.x, 3)))
+mostrar(resultado_cv)
+leitura(sprintf("nas 25 rodadas, a AUC variou de %s a %s (média %s).",
+                br(resultado_cv$AUC_min, 2), br(resultado_cv$AUC_max, 2), br(resultado_cv$AUC_media, 2)),
+        if_else(abs(resultado_cv$AUC_media - auc_valor) < 0.05,
+                "O resultado do teste é consistente: não foi sorte.",
+                "O resultado do teste difere da média: interprete com cautela."))
+
+
+# ==============================================================================
+# ETAPA 13 - DO MODELO À DECISÃO: MATRIZ RISCO x DESEMPENHO
+# ==============================================================================
+# Agora aplicamos o modelo aos ATIVOS e cruzamos risco de saída com desempenho.
+# A pesquisa de clima volta aqui: não para prever, mas para explicar e agir.
+titulo("ETAPA 13: plano de ação para os colaboradores ativos")
+
+ativos <- df_analitico %>%
+  filter(turnover_voluntario == 0) %>%
+  mutate(gender     = factor(gender, levels = levels(treino$gender)),
+         department = factor(department, levels = levels(treino$department)))
+
+ativos$prob_turnover <- predict(modelo_final, newdata = ativos, type = "response")
+
+ativos <- ativos %>%
+  filter(!is.na(prob_turnover)) %>%
+  mutate(
+    custo_estimado_reposicao = round(base_salary * 1.5, 2),  # premissa: 1,5x o salário anual
+    nivel_risco = case_when(
+      prob_turnover >= corte_otimo        ~ "1. Alto risco",
+      prob_turnover >= corte_otimo * 0.65 ~ "2. Médio risco",
+      TRUE                                ~ "3. Baixo risco"
+    ),
+    alto_desempenho = performance_rating >= 4.0,
+    quadrante_acao = case_when(
+      nivel_risco == "1. Alto risco"  &  alto_desempenho ~ "1. CRÍTICO: reter talento já",
+      nivel_risco == "1. Alto risco"  & !alto_desempenho ~ "2. ALERTA: mitigar risco operacional",
+      nivel_risco == "2. Médio risco" &  alto_desempenho ~ "3. MONITORAR: carreira e clima",
+      TRUE                                               ~ "4. MANUTENÇÃO: gestão de rotina"
+    )
+  )
+
+resumo_executivo <- ativos %>%
+  group_by(quadrante_acao) %>%
+  summarise(
+    colaboradores          = n(),
+    risco_medio_pct        = round(mean(prob_turnover) * 100, 1),
+    tempo_casa_meses       = round(mean(tempo_casa_meses), 1),
+    horas_extras_media     = round(mean(media_horas_extras), 2),
+    meses_sem_promocao     = round(mean(meses_desde_ultima_promocao), 1),
+    satisfacao_geral       = round(mean(overall_satisfaction, na.rm = TRUE), 2),
+    eficacia_gestor        = round(mean(manager_effectiveness, na.rm = TRUE), 2),
+    exposicao_financeira   = sum(custo_estimado_reposicao),
+    .groups = "drop"
+  )
+mostrar(resumo_executivo)
+write_excel_csv2(resumo_executivo, file.path(pasta_saida, "06_resumo_executivo.csv"))
+
+criticos <- filter(resumo_executivo, str_detect(quadrante_acao, "CRÍTICO"))
+if (nrow(criticos) > 0) {
+  leitura(sprintf("%d talentos de alto desempenho estão em alto risco. Exposição financeira estimada: %s.",
+                  criticos$colaboradores, br(criticos$exposicao_financeira, 0)),
+          sprintf("Eles têm, em média, %s meses de casa, contra %s no grupo de manutenção:",
+                  br(criticos$tempo_casa_meses),
+                  br(resumo_executivo$tempo_casa_meses[str_detect(resumo_executivo$quadrante_acao, "MANUTENÇÃO")])),
+          "o risco se concentra nos primeiros anos. Onboarding e integração viram prioridade.")
+}
+
+# Clima por quadrante: o que cada grupo sente de diferente?
+# (quem não respondeu à pesquisa aparece como NA e é ignorado nas médias)
+clima_quadrante <- ativos %>%
+  group_by(quadrante_acao) %>%
+  summarise(respondentes = sum(!is.na(overall_satisfaction)),
+            across(any_of(itens_clima), ~ round(mean(.x, na.rm = TRUE), 2)), .groups = "drop")
+cat("\nPesquisa de clima por quadrante (escala 1 a 5):\n")
+mostrar(clima_quadrante)
+pior_item <- clima_quadrante %>%
+  pivot_longer(any_of(itens_clima), names_to = "item", values_to = "media") %>%
+  slice_min(media, n = 1, with_ties = FALSE)
+leitura(sprintf("o ponto mais baixo do clima é '%s' no grupo '%s' (média %s de 5):",
+                pior_item$item, pior_item$quadrante_acao, br(pior_item$media, 2)),
+        "um bom ponto de partida para as stay interviews.")
+
+top_prioridades <- ativos %>%
+  filter(str_detect(quadrante_acao, "CRÍTICO")) %>%
+  arrange(desc(prob_turnover)) %>%
+  transmute(employee_id, department, job_level, performance_rating,
+            risco_pct = round(prob_turnover * 100, 1),
+            media_horas_extras = round(media_horas_extras, 2),
+            meses_desde_ultima_promocao, overall_satisfaction, manager_effectiveness,
+            custo_estimado_reposicao) %>%
+  head(10)
+cat("\nTop 10 talentos críticos para stay interviews (somente matrícula - LGPD):\n")
+mostrar(top_prioridades)
+write_excel_csv2(top_prioridades, file.path(pasta_saida, "07_top10_stay_interviews.csv"))
+
+cores_quadrante <- c("1. CRÍTICO: reter talento já"         = "#C0392B",
+                     "2. ALERTA: mitigar risco operacional" = "#E67E22",
+                     "3. MONITORAR: carreira e clima"       = "#F1C40F",
+                     "4. MANUTENÇÃO: gestão de rotina"      = "#27AE60")
+
+g9 <- ggplot(ativos, aes(x = prob_turnover, y = performance_rating, color = quadrante_acao)) +
+  geom_point(aes(size = base_salary), alpha = 0.7) +
+  geom_vline(xintercept = corte_otimo, linetype = "dashed", color = "gray30") +
+  geom_hline(yintercept = 4.0, linetype = "dashed", color = "gray30") +
+  scale_color_manual(values = cores_quadrante) +
+  scale_size_continuous(range = c(1, 6), labels = function(x) br(x, 0)) +
+  guides(color = guide_legend(nrow = 2), size = guide_legend(nrow = 1)) +
+  labs(title = "Matriz executiva: risco de saída x desempenho",
+       subtitle = "Linha vertical = corte de Youden | Linha horizontal = desempenho 4,0 | Bolha = salário",
+       x = "Probabilidade prevista de turnover voluntário", y = "Avaliação de desempenho",
+       color = NULL, size = "Salário base") +
+  tema_cap11 + theme(legend.box = "vertical")
+salvar_grafico(g9, "g09_matriz_risco_desempenho.png", 10, 7)
+
+g10 <- clima_quadrante %>%
+  pivot_longer(any_of(itens_clima), names_to = "item", values_to = "media") %>%
+  ggplot(aes(x = reorder(item, media), y = media, fill = quadrante_acao)) +
+  geom_col(position = position_dodge(width = 0.8), width = 0.75) +
+  coord_flip(ylim = c(1, 5)) +
+  scale_fill_manual(values = cores_quadrante) +
+  guides(fill = guide_legend(nrow = 2)) +
+  labs(title = "O que o clima revela em cada quadrante?",
+       subtitle = "Média dos itens da pesquisa de engajamento (1 a 5) - colaboradores ativos",
+       x = NULL, y = "Média", fill = NULL) +
+  tema_cap11
+salvar_grafico(g10, "g10_clima_por_quadrante.png", 10, 7)
+
+
+# ==============================================================================
+# ETAPA 14 - LIMITES E CUIDADOS ÉTICOS
+# ==============================================================================
+titulo("ETAPA 14: o que este modelo NÃO diz")
+cat(
+"1. Associação não é causa: um fator ligado à saída não prova que ele provoque a saída.
+2. Amostra pequena de saídas (", sum(df_analitico$turnover_voluntario), " casos): os intervalos de confiança são largos.
+3. Tempo de casa é o sinal mais forte, mas tem uma armadilha: quem saiu teve, por definição,
+   menos tempo de observação. O passo seguinte é a Análise de Sobrevivência (Kaplan-Meier, Cox),
+   que pergunta QUANDO a saída acontece, e não só SE ela acontece.
+4. Os ativos pontuados na Etapa 13 também ajudaram a treinar o modelo; em produção,
+   o modelo deve ser validado com dados de um período posterior.
+5. O custo de reposição (1,5x o salário) é uma premissa e deve ser ajustado à realidade local.
+6. LGPD: a lista de prioridades é um apoio à conversa (stay interview), nunca uma base para
+   punição ou decisão automatizada sobre a pessoa.\n", sep = "")
+
+titulo("PIPELINE CONCLUÍDO")
+cat("Tabelas (.csv) e gráficos (.png) salvos em:", normalizePath(pasta_saida), "\n")
