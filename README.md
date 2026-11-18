@@ -13,7 +13,7 @@ Este repositório está organizado em quatro pastas principais para facilitar su
 • 01-codigos-r/: O script completo (analise_turnover.R) utilizado no capítulo. O código possui mais de 250 linhas comentadas passo a passo, cobrindo desde a limpeza dos dados até a criação do modelo de Regressão Logística e a Matriz de Confusão.    
 
 • 02-datasets/:
-    ◦ Conjunto de 7 arquivos CSV com dados reais (anonimizados) do setor de saúde.
+    ◦ Conjunto de 6 arquivos CSV com dados fictícios, mas muito próximos à realidade do setor de saúde.
     ◦ Inclui dados históricos de 9 anos, cobrindo variáveis demográficas, de desempenho, satisfação e movimentação de pessoal.    
     
 • 03-documentacao/:
